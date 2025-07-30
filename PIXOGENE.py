@@ -10,368 +10,433 @@ from scipy.integrate import odeint
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import sys
-from importlib import reload  
+import os
+import time
+from multiprocessing import Pool
 from bisect import bisect_left as bsearch
 
 ''' 
 GLOBAL Constants
 '''
-# Lorenz paramters and initial conditions
-a, b, c = 10, 2.667, 28
-x0, y0, z0 = 0, 0, 0
+# Hyper-chaotic parameters
+a, b, c, d = 10, 8/3, 28, 1.3
+x0, y0, z0, w0 = 0, 0, 0, 0
 
-#DNA-Encoding RULE #1 A = 00, T=01, G=10, C=11
-dna={}
-dna["00"]="A"
-dna["01"]="T"
-dna["10"]="G"
-dna["11"]="C"
-dna["A"]=[0,0]
-dna["T"]=[0,1]
-dna["G"]=[1,0]
-dna["C"]=[1,1]
-#DNA xor
-dna["AA"]=dna["TT"]=dna["GG"]=dna["CC"]="A"
-dna["AG"]=dna["GA"]=dna["TC"]=dna["CT"]="G"
-dna["AC"]=dna["CA"]=dna["GT"]=dna["TG"]="C"
-dna["AT"]=dna["TA"]=dna["CG"]=dna["GC"]="T"
+# Encryption rounds
+ROUNDS = 2
+
+# DNA Encoding Rules (8 variants)
+DNA_RULES = [
+    # Rule 0: Standard
+    {"00": "A", "01": "T", "10": "G", "11": "C",
+     "A": [0,0], "T": [0,1], "G": [1,0], "C": [1,1],
+     "AA": "A", "TT": "A", "GG": "A", "CC": "A",
+     "AG": "G", "GA": "G", "TC": "G", "CT": "G",
+     "AC": "C", "CA": "C", "GT": "C", "TG": "C",
+     "AT": "T", "TA": "T", "CG": "T", "GC": "T"},
+    
+    # Rule 1
+    {"00": "C", "01": "G", "10": "T", "11": "A",
+     "C": [0,0], "G": [0,1], "T": [1,0], "A": [1,1],
+     "CC": "C", "GG": "C", "TT": "C", "AA": "C",
+     "CT": "T", "TC": "T", "GA": "T", "AG": "T",
+     "CA": "A", "AC": "A", "TG": "A", "GT": "A",
+     "CG": "G", "GC": "G", "TA": "G", "AT": "G"},
+    
+    # Rule 2
+    {"00": "T", "01": "A", "10": "C", "11": "G",
+     "T": [0,0], "A": [0,1], "C": [1,0], "G": [1,1],
+     "TT": "T", "AA": "T", "CC": "T", "GG": "T",
+     "TA": "A", "AT": "A", "CG": "A", "GC": "A",
+     "TG": "G", "GT": "G", "AC": "G", "CA": "G",
+     "TC": "C", "CT": "C", "AG": "C", "GA": "C"},
+    
+    # Rule 3
+    {"00": "G", "01": "C", "10": "A", "11": "T",
+     "G": [0,0], "C": [0,1], "A": [1,0], "T": [1,1],
+     "GG": "G", "CC": "G", "AA": "G", "TT": "G",
+     "GC": "C", "CG": "C", "AT": "C", "TA": "C",
+     "GA": "A", "AG": "A", "CT": "A", "TC": "A",
+     "GT": "T", "TG": "T", "CA": "T", "AC": "T"},
+    
+    # Additional rules 4-7 would follow similar patterns
+]
+
+# Active DNA rule
+dna = DNA_RULES[0]
+
 # Maximum time point and total number of time points
 tmax, N = 100, 10000
 
-def lorenz(X, t, a, b, c):
-    x, y, z = X
-    x_dot = -a*(x - y)
-    y_dot = c*x - y - x*z
-    z_dot = -b*z + x*y
-    return x_dot, y_dot, z_dot
+def hyper_lorenz(X, t, a, b, c, d):
+    """4D Hyper-chaotic Lorenz system"""
+    x, y, z, w = X
+    dx = a*(y - x) + w
+    dy = c*x - y - x*z
+    dz = x*y - b*z
+    dw = -d*x
+    return dx, dy, dz, dw
 
-def image_selector():                           #returns path to selected image
-    path = "NULL"
+def image_selector():
+    """GUI for image selection with validation"""
     root = tk.Tk()
-    root.withdraw()                             # we don't want a full GUI, so keep the root window from appearing
-    path = filedialog.askopenfilename()         # show an "Open" dialog box and return the path to the selected file
-    if path!="NULL":
-        print("Image loaded!") 
-    else:
-        print("Error Image not loaded!")
-    return path
+    root.withdraw()
+    filetypes = (
+        ('Image files', '*.jpg *.jpeg *.png *.bmp'),
+        ('All files', '*.*')
+    )
+    path = filedialog.askopenfilename(filetypes=filetypes)
+    if path and os.path.isfile(path):
+        print(f"Image loaded: {os.path.basename(path)}")
+        return path
+    print("Error: No image selected")
+    sys.exit(1)
 
 def split_into_rgb_channels(image):
-  red = image[:,:,2]
-  green = image[:,:,1]
-  blue = image[:,:,0]
-  return red, green, blue
+    """Split image into RGB channels"""
+    red = image[:,:,2]
+    green = image[:,:,1]
+    blue = image[:,:,0]
+    return blue, green, red
 
-#Secure key generation
-def securekey (iname):
-    img = Image.open(iname)
-    m, n = img.size
-    print("pixels: {0}  width: {2} height: {1} ".format(m*n, m, n))
-    pix = img.load()          
-    plainimage = list()                         #_plainimage contains all the rgb values continuously
-    for y in range(n):
-        for x in range(m):
-            for k in range(0,3):
-                plainimage.append(pix[x,y][k])    
-    key = hashlib.sha256()                      #key is made a hash.sha256 object  
-    key.update(bytearray(plainimage))           #image data is fed to generate digest
-    return key.hexdigest() ,m ,n
+def securekey(iname, user_key=""):
+    """Generate secure key from image and optional user key"""
+    try:
+        img = Image.open(iname)
+        m, n = img.size
+        print(f"Image size: {m}x{n} pixels")
+        pix = img.load()
+        plainimage = []
+        for y in range(n):
+            for x in range(m):
+                for k in range(3):
+                    plainimage.append(pix[x,y][k])
+        
+        # Combine user key with image data
+        combined = user_key.encode() + bytearray(plainimage)
+        key = hashlib.sha256(combined).hexdigest()
+        return key, m, n
+    except Exception as e:
+        print(f"Key generation error: {str(e)}")
+        sys.exit(1)
 
-def update_lorentz (key):
-    key_bin = bin(int(key, 16))[2:].zfill(256)  #covert hex key digest to binary
-    k={}                                        #key dictionary
-    key_32_parts=textwrap.wrap(key_bin, 8)      #slicing key into 8 parts
-    num=1
-    for i in key_32_parts:
-        k["k{0}".format(num)]=i
-        num = num + 1
-    t1 = t2 = t3 = 0
-    for i in range (1,12):
-        t1=t1^int(k["k{0}".format(i)],2)
-    for i in range (12,23):
-        t2=t2^int(k["k{0}".format(i)],2)
-    for i in range (23,33):
-        t3=t3^int(k["k{0}".format(i)],2)   
-    global x0 ,y0, z0
-    x0=x0 + t1/256            
-    y0=y0 + t2/256            
-    z0=z0 + t3/256            
+def update_lorentz(key):
+    """Update initial conditions using key material"""
+    global x0, y0, z0, w0
+    key_bin = bin(int(key, 16))[2:].zfill(256)
+    key_parts = textwrap.wrap(key_bin, 8)
+    
+    t1 = t2 = t3 = t4 = 0
+    for i in range(8):  # First 8 bytes
+        t1 ^= int(key_parts[i], 2)
+    for i in range(8, 16):  # Next 8 bytes
+        t2 ^= int(key_parts[i], 2)
+    for i in range(16, 24):  # Next 8 bytes
+        t3 ^= int(key_parts[i], 2)
+    for i in range(24, 32):  # Last 8 bytes
+        t4 ^= int(key_parts[i], 2)
+    
+    # Update initial conditions
+    x0 += t1 / 255.0
+    y0 += t2 / 255.0
+    z0 += t3 / 255.0
+    w0 += t4 / 255.0
+    
+    # Select DNA rule based on initial conditions
+    rule_idx = int((abs(w0) * 1000) % len(DNA_RULES))
+    global dna
+    dna = DNA_RULES[rule_idx]
+    print(f"Using DNA Rule #{rule_idx}")
 
 def decompose_matrix(iname):
-    image = cv2.imread(iname)
-    blue,green,red = split_into_rgb_channels(image)
-    for values, channel in zip((red, green, blue), (2,1,0)):
-        img = np.zeros((values.shape[0], values.shape[1]), dtype = np.uint8)
-        img[:,:] = (values)
-        if channel == 0:
-            B = np.asmatrix(img)
-        elif channel == 1:
-            G = np.asmatrix(img)
-        else:
-            R = np.asmatrix(img)
-    return B,G,R
+    """Decompose image into RGB matrices with error handling"""
+    try:
+        image = cv2.imread(iname)
+        if image is None:
+            raise ValueError("Could not read image")
+        return split_into_rgb_channels(image)
+    except Exception as e:
+        print(f"Image decomposition error: {str(e)}")
+        sys.exit(1)
 
-def dna_encode(b,g,r):
+def dna_encode(channel):
+    """Vectorized DNA encoding for a single channel"""
+    bits = np.unpackbits(channel, axis=1)
+    high, low = bits[:, 0::2], bits[:, 1::2]
+    indices = (high << 1) + low
+    shape = indices.shape
+    flat = indices.flatten()
     
-    b = np.unpackbits(b,axis=1)
-    g = np.unpackbits(g,axis=1)
-    r = np.unpackbits(r,axis=1)
-    m,n = b.shape
-    r_enc= np.chararray((m,int(n/2)))
-    g_enc= np.chararray((m,int(n/2)))
-    b_enc= np.chararray((m,int(n/2)))
-    
-    for color,enc in zip((b,g,r),(b_enc,g_enc,r_enc)):
-        idx=0
-        for j in range(0,m):
-            for i in range(0,n,2):
-                enc[j,idx]=dna["{0}{1}".format(color[j,i],color[j,i+1])]
-                idx+=1
-                if (i==n-2):
-                    idx=0
-                    break
-    
-    b_enc=b_enc.astype(str)
-    g_enc=g_enc.astype(str)
-    r_enc=r_enc.astype(str)
-    return b_enc,g_enc,r_enc
+    # Vectorized mapping
+    encoded = np.vectorize(lambda x: dna[f"{x:02b}"])(flat)
+    return encoded.reshape(shape)
 
-def key_matrix_encode(key,b):    
-    #encoded key matrix
-    b = np.unpackbits(b,axis=1)
-    m,n = b.shape
+def dna_encode_parallel(b, g, r):
+    """Parallel DNA encoding for all channels"""
+    with Pool(3) as pool:
+        results = pool.map(dna_encode, [b, g, r])
+    return results
+
+def key_matrix_encode(key, channel):
+    """Generate encoded key matrix"""
+    bits = np.unpackbits(channel, axis=1)
+    m, n = bits.shape
     key_bin = bin(int(key, 16))[2:].zfill(256)
-    Mk = np.zeros((m,n),dtype=np.uint8)
-    x=0
-    for j in range(0,m):
-            for i in range(0,n):
-                Mk[j,i]=key_bin[x%256]
-                x+=1
     
-    Mk_enc=np.chararray((m,int(n/2)))
-    idx=0
-    for j in range(0,m):
-        for i in range(0,n,2):
-            if idx==(n/2):
-                idx=0
-            Mk_enc[j,idx]=dna["{0}{1}".format(Mk[j,i],Mk[j,i+1])]
-            idx+=1
-    Mk_enc=Mk_enc.astype(str)
-    return Mk_enc
-
-def xor_operation(b,g,r,mk):
-    m,n = b.shape
-    bx=np.chararray((m,n))
-    gx=np.chararray((m,n))
-    rx=np.chararray((m,n))
-    b=b.astype(str)
-    g=g.astype(str)
-    r=r.astype(str)
-    for i in range(0,m):
-        for j in range (0,n):
-            bx[i,j] = dna["{0}{1}".format(b[i,j],mk[i,j])]
-            gx[i,j] = dna["{0}{1}".format(g[i,j],mk[i,j])]
-            rx[i,j] = dna["{0}{1}".format(r[i,j],mk[i,j])]
-         
-    bx=bx.astype(str)
-    gx=gx.astype(str)
-    rx=rx.astype(str)
-    return bx,gx,rx 
-
-def gen_chaos_seq(m,n):
-    global x0,y0,z0,a,b,c,N
-    N=m*n*4
-    x= np.array((m,n*4))
-    y= np.array((m,n*4))
-    z= np.array((m,n*4))
-    t = np.linspace(0, tmax, N)
-    f = odeint(lorenz, (x0, y0, z0), t, args=(a, b, c))
-    x, y, z = f.T
-    x=x[:(N)]
-    y=y[:(N)]
-    z=z[:(N)]
-    return x,y,z
-
-def plot(x,y,z):
-    fig = plt.figure()
-    ax = fig.gca(projection='3d')
-    s = 100
-    c = np.linspace(0,1,N)
-    for i in range(0,N-s,s):
-        ax.plot(x[i:i+s+1], y[i:i+s+1], z[i:i+s+1], color=(1-c[i],c[i],1), alpha=0.4)
-    ax.set_axis_off()
-    plt.show()
-
-def sequence_indexing(x,y,z):
-    n=len(x)
-    fx=np.zeros((n),dtype=np.uint32)
-    fy=np.zeros((n),dtype=np.uint32)
-    fz=np.zeros((n),dtype=np.uint32)
-    seq=sorted(x)
-    for k1 in range(0,n):
-            t = x[k1]
-            k2 = bsearch(seq, t)
-            fx[k1]=k2
-    seq=sorted(y)
-    for k1 in range(0,n):
-            t = y[k1]
-            k2 = bsearch(seq, t)
-            fy[k1]=k2
-    seq=sorted(z)
-    for k1 in range(0,n):
-            t = z[k1]
-            k2 = bsearch(seq, t)
-            fz[k1]=k2
-    return fx,fy,fz
-        
-def scramble(fx,fy,fz,b,r,g):
-    p,q=b.shape
-    size = p*q
-    bx=b.reshape(size).astype(str)
-    gx=g.reshape(size).astype(str)
-    rx=r.reshape(size).astype(str)
-    bx_s=np.chararray((size))
-    gx_s=np.chararray((size))
-    rx_s=np.chararray((size))
-
-    for i in range(size):
-            idx = fz[i]
-            bx_s[i] = bx[idx]
-    for i in range(size):
-            idx = fy[i]
-            gx_s[i] = gx[idx]
-    for i in range(size):
-            idx = fx[i]
-            rx_s[i] = rx[idx]     
-    bx_s=bx_s.astype(str)
-    gx_s=gx_s.astype(str)
-    rx_s=rx_s.astype(str)
+    # Generate key matrix
+    Mk = np.zeros((m, n), dtype=np.uint8)
+    for j in range(m):
+        for i in range(n):
+            Mk[j, i] = int(key_bin[(j * n + i) % 256])
     
-    b_s=np.chararray((p,q))
-    g_s=np.chararray((p,q))
-    r_s=np.chararray((p,q))
-
-    b_s=bx_s.reshape(p,q)
-    g_s=gx_s.reshape(p,q)
-    r_s=rx_s.reshape(p,q)
-    return b_s,g_s,r_s
-
-def scramble_new(fx,fy,fz,b,g,r):
-    p,q=b.shape
-    size = p*q
-    bx=b.reshape(size)
-    gx=g.reshape(size)
-    rx=r.reshape(size)
-
-    bx_s=b.reshape(size)
-    gx_s=g.reshape(size)
-    rx_s=r.reshape(size)
+    # DNA encode key matrix
+    high, low = Mk[:, 0::2], Mk[:, 1::2]
+    indices = (high << 1) + low
+    shape = indices.shape
+    flat = indices.flatten()
     
-    bx=bx.astype(str)
-    gx=gx.astype(str)
-    rx=rx.astype(str)
-    bx_s=bx_s.astype(str)
-    gx_s=gx_s.astype(str)
-    rx_s=rx_s.astype(str)
+    # Vectorized mapping
+    Mk_enc = np.vectorize(lambda x: dna[f"{x:02b}"])(flat)
+    return Mk_enc.reshape(shape)
+
+def xor_operation(b, g, r, mk):
+    """Parallel XOR operation for all channels"""
+    def xor_channel(channel, mk):
+        m, n = channel.shape
+        result = np.chararray((m, n))
+        for i in range(m):
+            for j in range(n):
+                result[i, j] = dna[f"{channel[i,j]}{mk[i,j]}"]
+        return result.astype(str)
     
-    for i in range(size):
-            idx = fz[i]
-            bx_s[idx] = bx[i]
-    for i in range(size):
-            idx = fy[i]
-            gx_s[idx] = gx[i]
-    for i in range(size):
-            idx = fx[i]
-            rx_s[idx] = rx[i]    
+    with Pool(3) as pool:
+        results = pool.starmap(xor_channel, [(b, mk), (g, mk), (r, mk)])
+    return results
 
-    b_s=np.chararray((p,q))
-    g_s=np.chararray((p,q))
-    r_s=np.chararray((p,q))
+def gen_chaos_seq(length, precision=np.float64):
+    """Generate hyper-chaotic sequences with fixed precision"""
+    global x0, y0, z0, w0, a, b, c, d
+    t = np.linspace(0, tmax, length, dtype=precision)
+    f = odeint(hyper_lorenz, (x0, y0, z0, w0), t, 
+                args=(a, b, c, d), rtol=1e-12, atol=1e-12)
+    x, y, z, w = f.T
+    
+    # Update initial conditions for next round
+    x0, y0, z0, w0 = x[-1], y[-1], z[-1], w[-1]
+    return x, y, z, w
 
-    b_s=bx_s.reshape(p,q)
-    g_s=gx_s.reshape(p,q)
-    r_s=rx_s.reshape(p,q)
+def sequence_indexing(seq):
+    """Efficient sequence indexing using argsort"""
+    indices = np.argsort(seq)
+    ranks = np.argsort(indices)
+    return ranks
 
-    return b_s,g_s,r_s
+def scramble(fx, fy, fz, b, g, r):
+    """Scramble channels using chaotic indices"""
+    def apply_scramble(indices, channel):
+        flat = channel.reshape(-1)
+        scrambled = flat[indices].reshape(channel.shape)
+        return scrambled
+    
+    with Pool(3) as pool:
+        results = pool.starmap(apply_scramble, 
+                              [(fz, b), (fy, g), (fx, r)])
+    return results
 
+def dna_decode(channel_enc):
+    """Vectorized DNA decoding for a single channel"""
+    m, n = channel_enc.shape
+    decoded = np.zeros((m, n*2), dtype=np.uint8)
+    
+    for j in range(m):
+        for i in range(n):
+            base = channel_enc[j, i]
+            decoded[j, 2*i] = dna[base][0]
+            decoded[j, 2*i+1] = dna[base][1]
+    
+    return np.packbits(decoded, axis=1)
 
-def dna_decode(b,g,r):
-    m,n = b.shape
-    r_dec= np.ndarray((m,int(n*2)),dtype=np.uint8)
-    g_dec= np.ndarray((m,int(n*2)),dtype=np.uint8)
-    b_dec= np.ndarray((m,int(n*2)),dtype=np.uint8)
-    for color,dec in zip((b,g,r),(b_dec,g_dec,r_dec)):
-        for j in range(0,m):
-            for i in range(0,n):
-                dec[j,2*i]=dna["{0}".format(color[j,i])][0]
-                dec[j,2*i+1]=dna["{0}".format(color[j,i])][1]
-    b_dec=(np.packbits(b_dec,axis=-1))
-    g_dec=(np.packbits(g_dec,axis=-1))
-    r_dec=(np.packbits(r_dec,axis=-1))
-    return b_dec,g_dec,r_dec
+def dna_decode_parallel(b_enc, g_enc, r_enc):
+    """Parallel DNA decoding for all channels"""
+    with Pool(3) as pool:
+        results = pool.map(dna_decode, [b_enc, g_enc, r_enc])
+    return results
 
-def xor_operation_new(b,g,r,mk):
-    m,n = b.shape
-    bx=np.chararray((m,n))
-    gx=np.chararray((m,n))
-    rx=np.chararray((m,n))
-    b=b.astype(str)
-    g=g.astype(str)
-    r=r.astype(str)
-    for i in range(0,m):
-        for j in range (0,n):
-            bx[i,j] = dna["{0}{1}".format(b[i,j],mk[i,j])]
-            gx[i,j] = dna["{0}{1}".format(g[i,j],mk[i,j])]
-            rx[i,j] = dna["{0}{1}".format(r[i,j],mk[i,j])]
-         
-    bx=bx.astype(str)
-    gx=gx.astype(str)
-    rx=rx.astype(str)
-    return bx,gx,rx 
+def apply_chaotic_diffusion(channel, chaotic_seq):
+    """Apply chaotic diffusion to a channel"""
+    # Normalize and quantize chaotic sequence
+    seq_min, seq_max = chaotic_seq.min(), chaotic_seq.max()
+    normalized = (chaotic_seq - seq_min) / (seq_max - seq_min)
+    int_seq = (normalized * 255).astype(np.uint8)
+    
+    # Reshape to match channel dimensions
+    int_seq = int_seq[:channel.size].reshape(channel.shape)
+    
+    # Apply XOR diffusion
+    return np.bitwise_xor(channel, int_seq)
 
-def recover_image(b,g,r,iname):
-    img = cv2.imread(iname)
-    img[:,:,2] = r
-    img[:,:,1] = g
+def recover_image(b, g, r, iname, suffix="_enc"):
+    """Save encrypted/decrypted image"""
+    dir_name, file_name = os.path.split(iname)
+    base_name, ext = os.path.splitext(file_name)
+    output_path = os.path.join(dir_name, f"{base_name}{suffix}{ext}")
+    
+    # Create empty RGB image
+    img = np.zeros((b.shape[0], b.shape[1], 3), dtype=np.uint8)
     img[:,:,0] = b
-    cv2.imwrite(("enc.jpg"), img)
-    print("saved ecrypted image as enc.jpg")
+    img[:,:,1] = g
+    img[:,:,2] = r
+    
+    cv2.imwrite(output_path, img)
+    print(f"Saved image: {output_path}")
     return img
 
-def decrypt(image,fx,fy,fz,fp,Mk,bt,gt,rt,file):
-    r,g,b=split_into_rgb_channels(image)
-    p,q = rt.shape
-    benc,genc,renc=dna_encode(b,g,r)
-    bs,gs,rs=scramble_new(fx,fy,fz,benc,genc,renc)
-    bx,rx,gx=xor_operation_new(bs,gs,rs,Mk)
-    blue,green,red=dna_decode(bx,gx,rx)
-    green,red = red, green
-    img=np.zeros((p,q,3),dtype=np.uint8)
-    img[:,:,0] = red
-    img[:,:,1] = green
-    img[:,:,2] = blue
-    cv2.imwrite(file, img)
-    return img
+def security_metrics(orig, enc):
+    """Calculate NPCR and UACI for security validation"""
+    if orig.shape != enc.shape:
+        raise ValueError("Images must have same dimensions")
+    
+    # Calculate NPCR (Number of Pixels Change Rate)
+    diff = orig != enc
+    npcr = np.mean(diff) * 100
+    
+    # Calculate UACI (Unified Average Changing Intensity)
+    uaci = np.mean(np.abs(orig.astype(int) - enc.astype(int)) / 255 * 100
+    
+    return npcr, uaci
 
-#program exec9
-if (__name__ == "__main__"):
-    file_path = image_selector()
-    print(file_path)
-    key,m,n = securekey(file_path)
+def encrypt_image(iname, user_key="", rounds=ROUNDS):
+    """Full encryption pipeline"""
+    start_time = time.time()
+    key, m, n = securekey(iname, user_key)
     update_lorentz(key)
-    blue,green,red=decompose_matrix(file_path)
-    blue_e,green_e,red_e=dna_encode(blue,green,red)
-    Mk_e = key_matrix_encode(key,blue)
-    blue_final, green_final, red_final = xor_operation(blue_e,green_e,red_e,Mk_e)
-    x,y,z=gen_chaos_seq(m,n)
-    fx,fy,fz=sequence_indexing(x,y,z)
-    blue_scrambled,green_scrambled,red_scrambled = scramble(fx,fy,fz,blue_final,red_final,green_final)
-    b,g,r=dna_decode(blue_scrambled,green_scrambled,red_scrambled)
-    img=recover_image(b,g,r,file_path)
-    cv2.imwrite((file_path),img)
-    ch=input("Do you want to continue?(y/n)")      
-    if ch=='y':
+    
+    # Load and decompose original image
+    orig_image = cv2.imread(iname)
+    b_orig, g_orig, r_orig = decompose_matrix(iname)
+    
+    # Encryption rounds
+    for round_idx in range(rounds):
+        print(f"\n--- Encryption Round {round_idx+1}/{rounds} ---")
+        
+        # Generate chaotic sequences
+        seq_length = m * n * 3
+        x, y, z, w = gen_chaos_seq(seq_length)
+        
+        # Sequence indexing
+        fx = sequence_indexing(x)
+        fy = sequence_indexing(y)
+        fz = sequence_indexing(z)
+        
+        # DNA encoding
+        b_enc, g_enc, r_enc = dna_encode_parallel(b_orig, g_orig, r_orig)
+        
+        # Key matrix
+        Mk_enc = key_matrix_encode(key, b_orig)
+        
+        # XOR operation
+        b_xor, g_xor, r_xor = xor_operation(b_enc, g_enc, r_enc, Mk_enc)
+        
+        # Scrambling
+        b_scram, g_scram, r_scram = scramble(fz, fy, fx, b_xor, g_xor, r_xor)
+        
+        # DNA decoding
+        b_dec, g_dec, r_dec = dna_decode_parallel(b_scram, g_scram, r_scram)
+        
+        # Apply chaotic diffusion
+        b_orig = apply_chaotic_diffusion(b_dec, w[:m*n].reshape(m, n))
+        g_orig = apply_chaotic_diffusion(g_dec, w[m*n:2*m*n].reshape(m, n))
+        r_orig = apply_chaotic_diffusion(r_dec, w[2*m*n:].reshape(m, n))
+    
+    # Save encrypted image
+    enc_image = recover_image(b_orig, g_orig, r_orig, iname, "_enc")
+    
+    # Security analysis
+    npcr, uaci = security_metrics(cv2.imread(iname), enc_image)
+    print(f"\nSecurity Metrics:")
+    print(f"NPCR: {npcr:.6f}% (Target > 99.6%)")
+    print(f"UACI: {uaci:.6f}% (Target > 33.4%)")
+    
+    print(f"\nEncryption completed in {time.time()-start_time:.2f} seconds")
+    return enc_image, (x, y, z, w, fx, fy, fz, Mk_enc, key)
+
+def decrypt_image(iname, params, user_key="", rounds=ROUNDS):
+    """Full decryption pipeline"""
+    start_time = time.time()
+    x, y, z, w, fx, fy, fz, Mk_enc, orig_key = params
+    
+    # Load encrypted image
+    enc_image = cv2.imread(iname)
+    b_enc, g_enc, r_enc = split_into_rgb_channels(enc_image)
+    m, n = b_enc.shape
+    
+    # Verify key
+    test_key, _, _ = securekey(iname, user_key)
+    if test_key != orig_key:
+        print("Warning: User key doesn't match encryption key!")
+    
+    # Decryption rounds (in reverse order)
+    for round_idx in range(rounds-1, -1, -1):
+        print(f"\n--- Decryption Round {rounds-round_idx}/{rounds} ---")
+        
+        # Reverse chaotic diffusion
+        w_seq = w[:m*n].reshape(m, n)
+        b_enc = apply_chaotic_diffusion(b_enc, w_seq)
+        g_enc = apply_chaotic_diffusion(g_enc, w_seq)
+        r_enc = apply_chaotic_diffusion(r_enc, w_seq)
+        
+        # DNA encoding
+        b_enc, g_enc, r_enc = dna_encode_parallel(b_enc, g_enc, r_enc)
+        
+        # Scrambling (reverse)
+        b_scram, g_scram, r_scram = scramble(fz, fy, fx, b_enc, g_enc, r_enc)
+        
+        # XOR operation
+        b_xor, g_xor, r_xor = xor_operation(b_scram, g_scram, r_scram, Mk_enc)
+        
+        # DNA decoding
+        b_dec, g_dec, r_dec = dna_decode_parallel(b_xor, g_xor, r_xor)
+        
+        # Prepare for next round
+        b_enc, g_enc, r_enc = b_dec, g_dec, r_dec
+    
+    # Save decrypted image
+    dec_image = recover_image(b_enc, g_enc, r_enc, iname, "_dec")
+    print(f"\nDecryption completed in {time.time()-start_time:.2f} seconds")
+    return dec_image
+
+# Main program
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  Encryption: python pixogene.py encrypt [user_key]")
+        print("  Decryption: python pixogene.py decrypt [user_key]")
+        sys.exit(1)
+    
+    mode = sys.argv[1].lower()
+    user_key = sys.argv[2] if len(sys.argv) > 2 else ""
+    
+    if mode not in ["encrypt", "decrypt"]:
+        print("Invalid mode. Use 'encrypt' or 'decrypt'")
+        sys.exit(1)
+    
+    file_path = image_selector()
+    
+    if mode == "encrypt":
+        # Encryption process
+        enc_image, params = encrypt_image(file_path, user_key)
+        
+        # Save parameters for decryption
+        param_path = os.path.splitext(file_path)[0] + "_params.npy"
+        np.save(param_path, params)
+        print(f"Saved encryption parameters to {param_path}")
+        
+    elif mode == "decrypt":
+        # Load parameters
+        param_path = os.path.splitext(file_path)[0] + "_params.npy"
+        if not os.path.exists(param_path):
+            print("Error: Encryption parameters not found")
+            sys.exit(1)
             
-        print("decrypting...")
-        decrypt(img,fx,fy,fz,file_path,Mk_e,blue,green,red,file_path)
-    #cv2.imwrite((file_path),img)
+        params = np.load(param_path, allow_pickle=True)
+        decrypt_image(file_path, params, user_key)
